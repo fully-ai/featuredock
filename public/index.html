@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FeatureDock — Feature Flags &amp; Rollouts</title>
+  <style>
+    body { margin:0; font-family:system-ui, sans-serif; background:#0d1117; color:#e6edf3; padding:20px; max-width:1180px; margin-inline:auto; }
+    .card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px; margin-bottom:14px; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    input, select, button { padding:7px 10px; border-radius:6px; border:1px solid #30363d; background:#21262d; color:#e6edf3; }
+    button { background:#2f81f7; border:none; cursor:pointer; font-weight:600; }
+    button.ghost { background:#21262d; border:1px solid #30363d; }
+    button.danger { background:#da3633; }
+    button.sm { padding:4px 8px; font-size:0.78rem; }
+    table { width:100%; border-collapse:collapse; font-size:0.86rem; }
+    th, td { text-align:left; padding:8px; border-bottom:1px solid #30363d; }
+    .hidden { display:none !important; }
+  </style>
+</head>
+<body>
+  <h1>FeatureDock</h1>
+  <div id="auth" class="card row">
+    <input id="u" placeholder="Username" />
+    <input id="p" type="password" placeholder="Password" />
+    <button onclick="login('/api/auth/login')">Sign In</button>
+    <button class="ghost" onclick="login('/api/auth/register')">Register</button>
+  </div>
+
+  <div id="ws" class="hidden">
+    <div class="card row">
+      <select id="proj" onchange="loadProject()"></select>
+      <button class="ghost" onclick="newProj()">+ Project</button>
+      <select id="env" onchange="loadFlags()"></select>
+      <span id="sdk-key-box" style="font-size:0.82rem;color:#8b949e;margin-left:auto;"></span>
+    </div>
+    <div class="card row">
+      <input id="fk" placeholder="flag-key (e.g. new-dashboard)" />
+      <select id="ft"><option>boolean</option><option>string</option><option>number</option><option>json</option></select>
+      <button onclick="createFlag()">Create Flag</button>
+    </div>
+    <div class="card">
+      <table><thead><tr><th>Flag Key</th><th>Type</th><th>Enabled</th><th>Kill Switch</th><th>Rollout %</th><th>Controls</th></tr></thead><tbody id="flags-body"></tbody></table>
+    </div>
+    <div class="card">
+      <strong>Audit History</strong>
+      <ul id="audit-list" style="font-size:0.82rem;color:#8b949e;padding-left:18px;"></ul>
+    </div>
+  </div>
+
+  <script>
+    let token = localStorage.getItem('fd_token') || '';
+    let envs = [];
+    function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+    async function api(url, opts = {}) {
+      const headers = { ...(opts.headers || {}) };
+      if (token) headers.Authorization = 'Bearer ' + token;
+      const r = await fetch(url, { ...opts, headers });
+      if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error || 'Error');
+      return r.json();
+    }
+    async function login(ep) {
+      const res = await api(ep, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: document.getElementById('u').value, password: document.getElementById('p').value }) });
+      token = res.token; localStorage.setItem('fd_token', token);
+      await init();
+    }
+    async function init() {
+      document.getElementById('auth').classList.add('hidden');
+      document.getElementById('ws').classList.remove('hidden');
+      const { projects } = await api('/api/projects');
+      const sel = document.getElementById('proj'); sel.innerHTML = '';
+      for (const p of projects) { const o = document.createElement('option'); o.value = p.id; o.textContent = `${p.name} (${p.key})`; sel.appendChild(o); }
+      if (projects.length) await loadProject();
+    }
+    async function newProj() {
+      const key = prompt('Project key:'); const name = prompt('Project name:');
+      if (!key || !name) return;
+      await api('/api/projects', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ key, name }) });
+      await init();
+    }
+    async function loadProject() {
+      const pid = document.getElementById('proj').value;
+      const res = await api(`/api/projects/${pid}/environments`);
+      envs = res.environments;
+      const es = document.getElementById('env'); es.innerHTML = '';
+      for (const e of envs) { const o = document.createElement('option'); o.value = e.id; o.textContent = `${e.name} (v${e.config_version})`; es.appendChild(o); }
+      await loadFlags();
+    }
+    async function loadFlags() {
+      const pid = document.getElementById('proj').value;
+      const eid = document.getElementById('env').value;
+      const curEnv = envs.find(e => e.id === eid);
+      document.getElementById('sdk-key-box').textContent = curEnv ? `SDK Key: ${curEnv.sdk_key} • v${curEnv.config_version}` : '';
+      const { flags } = await api(`/api/projects/${pid}/flags?env_id=${encodeURIComponent(eid)}`);
+      document.getElementById('flags-body').innerHTML = flags.map(f => {
+        const c = f.configs[0] || { enabled: 0, kill_switched: 0, rollout_percent: 0 };
+        return `<tr>
+          <td><code>${esc(f.key)}</code></td><td>${esc(f.flag_type)}</td>
+          <td>${c.enabled ? 'ON' : 'OFF'}</td><td>${c.kill_switched ? 'KILLED' : 'clear'}</td>
+          <td><input id="rp-${esc(f.id)}" type="number" min="0" max="100" value="${c.rollout_percent}" style="width:70px;" />%</td>
+          <td class="row">
+            <button class="ghost sm" onclick="patchCfg('${esc(f.id)}', { enabled: ${!c.enabled} })">Toggle</button>
+            <button class="ghost sm" onclick="patchCfg('${esc(f.id)}', { rollout_percent: Number(document.getElementById('rp-${esc(f.id)}').value) })">Set Rollout</button>
+            <button class="danger sm" onclick="patchCfg('${esc(f.id)}', { kill_switched: ${!c.kill_switched} })">Kill Switch</button>
+          </td>
+        </tr>`;
+      }).join('');
+      const { audit } = await api(`/api/projects/${pid}/audit`);
+      document.getElementById('audit-list').innerHTML = audit.slice(0, 12).map(a => `<li>${esc(a.created_at)} • ${esc(a.actor)} • ${esc(a.action)} (${esc(a.target)})</li>`).join('');
+    }
+    async function createFlag() {
+      const pid = document.getElementById('proj').value;
+      const key = document.getElementById('fk').value.trim();
+      const flag_type = document.getElementById('ft').value;
+      const def = flag_type === 'boolean' ? false : flag_type === 'number' ? 0 : flag_type === 'json' ? {} : 'control';
+      const rol = flag_type === 'boolean' ? true : flag_type === 'number' ? 1 : flag_type === 'json' ? { variant: 'B' } : 'treatment';
+      await api(`/api/projects/${pid}/flags`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ key, flag_type, default_value: def, rollout_value: rol }) });
+      await loadFlags();
+    }
+    async function patchCfg(fid, body) {
+      const eid = document.getElementById('env').value;
+      await api(`/api/flags/${fid}/environments/${eid}`, { method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      await loadProject();
+    }
+    if (token) init().catch(() => { token = ''; localStorage.removeItem('fd_token'); });
+  </script>
+</body>
+</html>

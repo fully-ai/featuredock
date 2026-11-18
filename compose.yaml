@@ -1,0 +1,17 @@
+services:
+  featuredock:
+    build: .
+    container_name: featuredock
+    ports:
+      - "127.0.0.1:8096:8096"
+    environment:
+      FEATUREDOCK_HOST: "0.0.0.0"
+      FEATUREDOCK_PORT: "8096"
+      FEATUREDOCK_DATA_DIR: "/data"
+      FEATUREDOCK_JWT_SECRET: "${FEATUREDOCK_JWT_SECRET:-change-me-jwt-secret}"
+    volumes:
+      - featuredock_data:/data
+    restart: unless-stopped
+
+volumes:
+  featuredock_data:
